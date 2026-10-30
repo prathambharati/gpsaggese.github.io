@@ -51,6 +51,9 @@ Chandrashekar), tracked in
     the run variance by 1.8 to 3.0
   - 4 of the 7 pre-registered predictions held (P1, P2, P4, P6), and P3, P5, and
     P7 did not
+- Phase 2 (how many SWE-bench records were real, run luck from 1 run, lower
+  temperatures, and 3 more models) is running, with its plan and predictions in
+  `preregistration_2.md`, committed before any of it was analyzed
 
 ## Status of the Milestones
 
@@ -82,6 +85,7 @@ Chandrashekar), tracked in
 | `fetch_evalplus_data.py`                | Download the EvalPlus datasets and the public EvalPlus samples              | Data      |
 | `fetch_swebench_verified.py`            | Download the public SWE-bench Verified results into `data/`                 | Data      |
 | `preregistration.md`                    | Design, analyses, and predictions of the local runs, written before them    | Docs      |
+| `preregistration_2.md`                  | Design and predictions of the 4 phase-2 studies, written before them        | Docs      |
 | `README.md`                             | This file                                                                   | Docs      |
 | `requirements.eval.txt`                 | Pinned packages that the EvalPlus scorer needs                              | Docker    |
 | `requirements.txt`                      | Pinned Python packages installed in the image                               | Docker    |

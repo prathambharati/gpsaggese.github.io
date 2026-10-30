@@ -367,8 +367,9 @@ def call_ollama(
     :param stop: texts that end the generation
     :param url: Ollama server
     :return: dict with `text`, `tokens_in`, `tokens_out`, `seconds`
-        (generation time on the server), and `done_reason` (`stop`, or
-        `length` if the answer hit the token limit)
+        (generation time on the server), and `done_reason` (`stop`,
+        `length` if the answer hit the token limit, or `repeat_limit` if
+        Ollama stopped an answer stuck repeating a token)
     """
     _LOG.debug(hprint.to_str("model temperature seed"))
     options = dict(GENERATION_OPTIONS, temperature=temperature, seed=seed)
@@ -383,16 +384,29 @@ def call_ollama(
         },
         timeout=600,
     )
-    response.raise_for_status()
-    body = response.json()
-    reply = {
-        # EvalPlus replaces tabs with 4 spaces.
-        "text": body["message"]["content"].replace("\t", "    "),
-        "tokens_in": body.get("prompt_eval_count", 0),
-        "tokens_out": body.get("eval_count", 0),
-        "seconds": body.get("total_duration", 0) / 1e9,
-        "done_reason": body.get("done_reason", ""),
-    }
+    if response.status_code == 500 and "token repeat limit" in response.text:
+        # Ollama stops an answer that repeats the same token too many times,
+        # e.g., "db0000000...", and returns an error. The answer has failed
+        # and a retry repeats it with the same seed, so return no code.
+        _LOG.warning("Ollama stopped a repeating answer: %s", response.text)
+        reply = {
+            "text": "",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "seconds": 0.0,
+            "done_reason": "repeat_limit",
+        }
+    else:
+        response.raise_for_status()
+        body = response.json()
+        reply = {
+            # EvalPlus replaces tabs with 4 spaces.
+            "text": body["message"]["content"].replace("\t", "    "),
+            "tokens_in": body.get("prompt_eval_count", 0),
+            "tokens_out": body.get("eval_count", 0),
+            "seconds": body.get("total_duration", 0) / 1e9,
+            "done_reason": body.get("done_reason", ""),
+        }
     return reply
 
 

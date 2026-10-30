@@ -7,6 +7,7 @@ import test.test_skill_vs_luck_runs_utils as ttsvlrut
 import logging
 import os
 import pprint
+import unittest.mock as umock
 import zipfile
 from typing import Any, Dict, Tuple
 
@@ -151,6 +152,67 @@ class Test_build_repair_messages(hunitest.TestCase):
         self.assertTrue(new_messages[1]["content"].endswith("    return 0\n```"))
         self.assertIn("assert f(1) == 1", new_messages[2]["content"])
         self.assertTrue(new_messages[3]["content"].endswith("```python\n"))
+
+
+# #############################################################################
+# Test_call_ollama
+# #############################################################################
+
+
+class Test_call_ollama(hunitest.TestCase):
+    """
+    Test `skill_vs_luck_runs_utils.call_ollama()` with a fake Ollama server.
+    """
+
+    def test1(self) -> None:
+        """
+        Test that an answer Ollama stops for repeating a token comes back
+        empty, without retrying.
+        """
+        # Prepare inputs: the error that Ollama returns.
+        response = umock.Mock(
+            status_code=500,
+            text='{"error":"prediction aborted, token repeat limit reached"}',
+        )
+        # Run test.
+        with umock.patch.object(
+            rutils.requests, "post", return_value=response
+        ) as post:
+            reply = rutils.call_ollama(
+                "m", [], temperature=0, seed=1, stop=[], url="http://fake"
+            )
+        # Check outputs.
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(reply["text"], "")
+        self.assertEqual(reply["done_reason"], "repeat_limit")
+
+    def test2(self) -> None:
+        """
+        Test that a normal answer comes back with its counts.
+        """
+        # Prepare inputs.
+        response = umock.Mock(status_code=200, text="")
+        response.json.return_value = {
+            "message": {"content": "\treturn 1"},
+            "prompt_eval_count": 5,
+            "eval_count": 3,
+            "total_duration": 2e9,
+            "done_reason": "stop",
+        }
+        # Run test.
+        with umock.patch.object(rutils.requests, "post", return_value=response):
+            reply = rutils.call_ollama(
+                "m", [], temperature=0, seed=1, stop=[], url="http://fake"
+            )
+        # Check outputs: tabs become 4 spaces, as in EvalPlus.
+        expected = {
+            "text": "    return 1",
+            "tokens_in": 5,
+            "tokens_out": 3,
+            "seconds": 2.0,
+            "done_reason": "stop",
+        }
+        self.assertEqual(reply, expected)
 
 
 # #############################################################################
