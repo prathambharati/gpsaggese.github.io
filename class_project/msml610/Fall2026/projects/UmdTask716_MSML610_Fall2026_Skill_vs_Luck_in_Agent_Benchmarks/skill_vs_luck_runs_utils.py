@@ -11,6 +11,8 @@ Used by `run_coding_agents.py`, `score_coding_runs.py`, and the
 - Split the variance of a score into its task and run parts, compare agents
   over tasks and runs, and check how stable a 1-run leaderboard is
 - Tune and test the estimator of run luck from 1 run (Study B)
+- Check the predictions of the lower temperatures (Study C) and of the 3
+  more models (Study D)
 
 Import as:
 
@@ -1213,18 +1215,24 @@ def compare_agents_over_runs(
 
 
 def compute_ranking_stability(
-    matrices: Dict[str, pd.DataFrame], *, n_draws: int = 10000, seed: int = 0
+    matrices: Dict[str, pd.DataFrame],
+    *,
+    n_draws: Optional[int] = 10000,
+    seed: int = 0,
 ) -> Tuple[pd.Series, pd.DataFrame]:
     """
     Check how often a leaderboard from 1 run per agent matches the
     leaderboard from all the runs.
 
     Each draw picks 1 run at random for each agent, as a leaderboard that
-    runs every agent once would.
+    runs every agent once would. With few agents and runs, every combination
+    of 1 run per agent can be taken once instead, which gives the exact
+    shares: random draws could split 2 equal shares by chance.
 
     :param matrices: agent label -> tasks x runs matrix of 0/1, same tasks
-    :param n_draws: number of random leaderboards
-    :param seed: random seed
+    :param n_draws: number of random leaderboards, or `None` to take every
+        combination of runs once
+    :param seed: random seed, unused with `n_draws=None`
     :return:
         - summary with `p_same_order` (share of draws that reverse no pair
           whose means over the runs differ) and `mean_kendall_tau`
@@ -1237,8 +1245,16 @@ def compute_ranking_stability(
         [matrices[label].mean(axis=0).to_numpy() for label in labels]
     )
     mean_scores = run_scores.mean(axis=1)
-    rng = np.random.default_rng(seed)
-    picks = rng.integers(0, run_scores.shape[1], size=(n_draws, len(labels)))
+    if n_draws is None:
+        # Each combination of 1 run per agent is as likely as any other.
+        n_runs = run_scores.shape[1]
+        hdbg.dassert_lte(n_runs ** len(labels), 10**6, "Too many combinations")
+        picks = np.array(
+            list(itertools.product(range(n_runs), repeat=len(labels)))
+        )
+    else:
+        rng = np.random.default_rng(seed)
+        picks = rng.integers(0, run_scores.shape[1], size=(n_draws, len(labels)))
     drawn = run_scores[np.arange(len(labels)), picks]
     # A draw keeps the order if it reverses no pair with different means: a
     # tie in the draw is not a reversal, and pairs with equal means have no
@@ -1248,7 +1264,7 @@ def compute_ranking_stability(
         for i, j in itertools.permutations(range(len(labels)), 2)
         if mean_scores[i] > mean_scores[j]
     ]
-    kept = np.ones(n_draws, dtype=bool)
+    kept = np.ones(len(picks), dtype=bool)
     for i, j in strict_pairs:
         kept &= drawn[:, i] >= drawn[:, j]
     same_order = float(kept.mean())
@@ -1364,15 +1380,32 @@ def compute_flaky_share(scores: pd.DataFrame) -> float:
 # #############################################################################
 
 
+def get_model_label(model: str) -> str:
+    """
+    Get a short name for a model, for tables and plots.
+
+    The name keeps the size of a local model, since 2 local models can share
+    a name (DeepSeek-Coder 1.3B and 6.7B).
+
+    :param model: e.g., `codeqwen:7b-chat-v1.5-q4_K_M` (local) or
+        `code-llama-7b` (public samples)
+    :return: e.g., `codeqwen 7b`
+    """
+    name, _, tag = model.partition(":")
+    if tag:
+        name = f"{name} {tag.split('-')[0]}"
+    return name
+
+
 def get_agent_label(model: str, scaffold: str) -> str:
     """
     Get a short name for an agent, for tables and plots.
 
     :param model: e.g., `codeqwen:7b-chat-v1.5-q4_K_M`
     :param scaffold: `one_shot` or `repair`
-    :return: e.g., `codeqwen / repair`
+    :return: e.g., `codeqwen 7b / repair`
     """
-    label = f"{model.split(':')[0]} / {scaffold}"
+    label = f"{get_model_label(model)} / {scaffold}"
     return label
 
 
@@ -1393,9 +1426,12 @@ def get_agent_matrices(
         & (scores["benchmark"] == benchmark)
         & (scores["temperature"] == temperature)
     )
-    agents = scores.loc[mask, ["model", "scaffold"]].drop_duplicates()
+    rows = scores.loc[mask, ["model", "scaffold"]].drop_duplicates()
+    agents = list(rows.itertuples(index=False))
+    labels = [get_agent_label(model, scaffold) for model, scaffold in agents]
+    hdbg.dassert_no_duplicates(labels, "2 agents have the same label")
     matrices = {
-        get_agent_label(model, scaffold): get_outcome_matrix(
+        label: get_outcome_matrix(
             scores,
             source=source,
             benchmark=benchmark,
@@ -1403,7 +1439,7 @@ def get_agent_matrices(
             scaffold=scaffold,
             temperature=temperature,
         )
-        for model, scaffold in agents.itertuples(index=False)
+        for label, (model, scaffold) in zip(labels, agents)
     }
     return matrices
 
@@ -1444,6 +1480,13 @@ _PUBLISHED_SCORES = [
     ("codeqwen:7b-chat-v1.5-q4_K_M", "mbpp", 79.4, 69.0),
     ("opencoder:8b", "humaneval", 81.7, 77.4),
     ("opencoder:8b", "mbpp", 82.0, 71.4),
+    # The models of phase 2 (`preregistration_2.md`, Study D).
+    ("deepseek-coder:6.7b-instruct-q4_K_M", "humaneval", 74.4, 71.3),
+    ("deepseek-coder:6.7b-instruct-q4_K_M", "mbpp", 74.9, 65.6),
+    ("llama3.1:8b-instruct-q4_K_M", "humaneval", 69.5, 62.8),
+    ("llama3.1:8b-instruct-q4_K_M", "mbpp", 68.3, 55.6),
+    ("codegemma:7b-instruct-q4_K_M", "humaneval", 60.4, 51.8),
+    ("codegemma:7b-instruct-q4_K_M", "mbpp", 70.4, 56.9),
 ]
 
 
@@ -2557,6 +2600,348 @@ def check_one_run_predictions(
             "observed": f"{int(above.sum())} of 18 above the truth",
             "holds": bool(above.sum() > 9),
         },
+    }
+    table = pd.DataFrame.from_dict(rows, orient="index")
+    return table
+
+
+# #############################################################################
+# Studies C and D: lower temperatures and more models
+# #############################################################################
+
+
+def combine_scores(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """
+    Combine the scores of the 2 phases of runs.
+
+    A file of runs that got more runs in phase 2 was scored again with all its
+    runs, e.g., the greedy runs of the phase-1 models, which got a second
+    greedy run. Those agents keep only their phase-2 scores.
+
+    :param old: output of `load_scores()` for phase 1
+    :param new: output of `load_scores()` for phase 2
+    :return: the scores of both phases, with each answer once
+    """
+    keys = ["source", "benchmark", "model", "temperature"]
+    old_keys = pd.MultiIndex.from_frame(old[keys])
+    rescored = old_keys.isin(pd.MultiIndex.from_frame(new[keys]))
+    # The new scores must cover every run of the old ones.
+    old_runs = old[rescored].groupby(keys)["run"].agg(set)
+    new_runs = new.groupby(keys)["run"].agg(set)
+    for key, runs in old_runs.items():
+        hdbg.dassert_is_subset(runs, new_runs[key], "'%s' lost runs", key)
+    scores = pd.concat([old[~rescored], new], ignore_index=True)
+    return scores
+
+
+def compute_rescored_agreement(
+    old: pd.DataFrame, new: pd.DataFrame
+) -> Dict[str, float]:
+    """
+    Check that the answers scored in both phases got the same results.
+
+    :param old: output of `load_scores()` for phase 1
+    :param new: output of `load_scores()` for phase 2
+    :return: dict with `n_answers` (answers scored in both phases) and
+        `same_share` (share of them with the same `plus_pass`)
+    """
+    keys = ["source", "benchmark", "model", "temperature", "scaffold"]
+    keys += ["task_id", "run"]
+    both = old[keys + ["plus_pass"]].merge(
+        new[keys + ["plus_pass"]], on=keys, suffixes=("_old", "_new")
+    )
+    hdbg.dassert_lt(0, len(both), "No answer was scored in both phases")
+    same = both["plus_pass_old"] == both["plus_pass_new"]
+    agreement = {"n_answers": len(both), "same_share": float(same.mean())}
+    return agreement
+
+
+def compute_greedy_changes(
+    scores: pd.DataFrame, *, models: List[str], benchmark: str
+) -> pd.DataFrame:
+    """
+    Count the tasks whose one-shot result changes between 2 greedy runs.
+
+    Greedy decoding has no randomness, so a change comes from Ollama itself,
+    e.g., from its prompt cache changing the arithmetic.
+
+    :param scores: output of `load_scores()`, with 2 greedy runs of each
+        model
+    :param models: e.g., `PHASE_1_MODELS`
+    :param benchmark: `humaneval` or `mbpp`
+    :return: 1 row per model with `n_tasks`, `n_changed` (tasks whose result
+        differs between the 2 runs), `changed_share`, and the score of each
+        run, `score_run_0` and `score_run_1`
+    """
+    rows = {}
+    for model in models:
+        outcomes = get_outcome_matrix(
+            scores,
+            source="local",
+            benchmark=benchmark,
+            model=model,
+            scaffold="one_shot",
+            temperature=0.0,
+        )
+        hdbg.dassert_eq(list(outcomes.columns), [0, 1], "Need 2 greedy runs")
+        changed = outcomes[0] != outcomes[1]
+        rows[model] = {
+            "n_tasks": len(outcomes),
+            "n_changed": int(changed.sum()),
+            "changed_share": float(changed.mean()),
+            "score_run_0": float(outcomes[0].mean()),
+            "score_run_1": float(outcomes[1].mean()),
+        }
+    table = pd.DataFrame.from_dict(rows, orient="index")
+    return table
+
+
+def get_first_runs_matrices(
+    scores: pd.DataFrame,
+    *,
+    models: List[str],
+    scaffold: str,
+    benchmark: str,
+    temperature: float,
+    n_runs: int,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Get the tasks x runs matrices of some local agents, with only their first
+    runs.
+
+    Leaderboards that are compared must draw from the same number of runs
+    (`preregistration_2.md`): with fewer runs, the drawn run is a bigger part
+    of the mean it is checked against.
+
+    :param scores: output of `load_scores()`
+    :param models: e.g., `PHASE_1_MODELS`
+    :param scaffold: `one_shot` or `repair`
+    :param benchmark: `humaneval` or `mbpp`
+    :param temperature: e.g., `0.8`
+    :param n_runs: number of first runs to keep, e.g., `3`
+    :return: agent label -> tasks x runs matrix of 0/1 with the runs 0 to
+        `n_runs - 1`
+    """
+    runs = list(range(n_runs))
+    matrices = {}
+    for model in models:
+        outcomes = get_outcome_matrix(
+            scores,
+            source="local",
+            benchmark=benchmark,
+            model=model,
+            scaffold=scaffold,
+            temperature=temperature,
+        )
+        hdbg.dassert_is_subset(runs, outcomes.columns, "'%s' lacks runs", model)
+        matrices[get_agent_label(model, scaffold)] = outcomes[runs]
+    hdbg.dassert_eq(len(matrices), len(models), "2 models have the same label")
+    return matrices
+
+
+def compute_stability_table(
+    scores: pd.DataFrame,
+    *,
+    models: List[str],
+    benchmark: str,
+    temperatures: List[float],
+    n_runs: int,
+    n_draws: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Check how often 1-run leaderboards of some models keep their order, for
+    each scaffold and temperature.
+
+    :param scores: output of `load_scores()`
+    :param models: e.g., `PHASE_1_MODELS`
+    :param benchmark: `humaneval` or `mbpp`
+    :param temperatures: e.g., `[0.2, 0.8]`
+    :param n_runs: first runs of each agent to draw from (see
+        `get_first_runs_matrices()`)
+    :param n_draws: random leaderboards per scaffold and temperature, or
+        `None` to take every combination of runs once (see
+        `compute_ranking_stability()`)
+    :return: 1 row per scaffold and temperature with the summary of
+        `compute_ranking_stability()`
+    """
+    rows = {}
+    for scaffold in ("one_shot", "repair"):
+        for temperature in temperatures:
+            matrices = get_first_runs_matrices(
+                scores,
+                models=models,
+                scaffold=scaffold,
+                benchmark=benchmark,
+                temperature=temperature,
+                n_runs=n_runs,
+            )
+            summary, _ = compute_ranking_stability(matrices, n_draws=n_draws)
+            rows[(scaffold, temperature)] = summary
+    table = pd.DataFrame(rows).T
+    table.index.names = ["scaffold", "temperature"]
+    return table
+
+
+def check_temperature_predictions(
+    *,
+    variance_low: pd.DataFrame,
+    variance_high: pd.DataFrame,
+    greedy_changes: pd.DataFrame,
+    comparisons: pd.DataFrame,
+    stability: pd.DataFrame,
+    low: float = 0.2,
+    high: float = 0.8,
+) -> pd.DataFrame:
+    """
+    Check the predictions C1 to C5 of `preregistration_2.md` (Study C).
+
+    - C1: the run share at 0.2 is between 5% and 30% for each of the 6 agents
+    - C2: the run share at 0.2 is below the one at 0.8 for each agent
+    - C3: fewer than 2% of the tasks change their one-shot result between the
+      2 greedy runs, for each model
+    - C4: the close pair is not distinguishable at 0.2, with either scaffold
+    - C5: 1-run leaderboards of the 3 models keep the order more often at 0.2
+      than at 0.8, for each scaffold
+
+    :param variance_low: output of `compute_variance_table()` at 0.2
+    :param variance_high: output of `compute_variance_table()` at 0.8, with
+        all the runs of phase 1
+    :param greedy_changes: output of `compute_greedy_changes()`
+    :param comparisons: output of `compare_agent_pairs()` for the close pair
+        at 0.2, 1 row per scaffold
+    :param stability: output of `compute_stability_table()` at both
+        temperatures
+    :param low: the lower temperature
+    :param high: the higher temperature
+    :return: 1 row per prediction, `C1` to `C5`, with `prediction`,
+        `observed`, and `holds`
+    """
+    rows = {}
+    # C1 and C2: the run share of each agent at the 2 temperatures.
+    share_low = variance_low["run_share"]
+    share_high = variance_high["run_share"].reindex(share_low.index)
+    hdbg.dassert_eq(len(share_low), 6, "Study C has 6 agents")
+    hdbg.dassert(not share_high.isna().any(), "An agent misses its run share")
+    inside = share_low.between(0.05, 0.30)
+    rows["C1"] = {
+        "prediction": f"Runs are 5% to 30% of the variance at {low:g}",
+        "observed": (
+            f"{int(inside.sum())} of {len(inside)} inside, from "
+            f"{100 * share_low.min():.0f}% to {100 * share_low.max():.0f}%"
+        ),
+        "holds": bool(inside.all()),
+    }
+    drop = share_high - share_low
+    rows["C2"] = {
+        "prediction": f"The run share is lower at {low:g} than at {high:g}",
+        "observed": (
+            f"{int((drop > 0).sum())} of {len(drop)} lower, by "
+            f"{100 * drop.min():.0f} to {100 * drop.max():.0f} points"
+        ),
+        "holds": bool((drop > 0).all()),
+    }
+    # C3: the tasks that change between the 2 greedy runs.
+    changed = greedy_changes["changed_share"]
+    hdbg.dassert_eq(len(changed), 3, "Study C has 3 models")
+    rows["C3"] = {
+        "prediction": "Fewer than 2% of the tasks change between greedy runs",
+        "observed": (
+            f"{int((changed < 0.02).sum())} of {len(changed)} models below "
+            f"2%, from {100 * changed.min():.1f}% to "
+            f"{100 * changed.max():.1f}%"
+        ),
+        "holds": bool((changed < 0.02).all()),
+    }
+    # C4: the close pair at the lower temperature.
+    hdbg.dassert_eq(len(comparisons), 2, "Study C has 1 test per scaffold")
+    n_distinguishable = int(comparisons["distinguishable"].sum())
+    rows["C4"] = {
+        "prediction": f"The close pair is not distinguishable at {low:g}",
+        "observed": (
+            f"{n_distinguishable} of {len(comparisons)} comparisons "
+            f"distinguishable, smallest Holm p "
+            f"{comparisons['p_holm'].min():.3g}"
+        ),
+        "holds": n_distinguishable == 0,
+    }
+    # C5: the 1-run leaderboards at the 2 temperatures.
+    kept_low = stability.xs(low, level="temperature")["p_same_order"]
+    kept_high = stability.xs(high, level="temperature")["p_same_order"]
+    more = kept_low > kept_high
+    shares = ", ".join(
+        f"{scaffold} {100 * kept_low[scaffold]:.1f}% vs "
+        f"{100 * kept_high[scaffold]:.1f}%"
+        for scaffold in kept_low.index
+    )
+    rows["C5"] = {
+        "prediction": f"1-run leaderboards keep the order more often at {low:g}",
+        "observed": (
+            f"{int(more.sum())} of {len(more)} scaffolds more often ({shares})"
+        ),
+        "holds": bool(more.all()),
+    }
+    table = pd.DataFrame.from_dict(rows, orient="index")
+    return table
+
+
+def check_new_model_predictions(
+    *,
+    validation: pd.DataFrame,
+    comparisons: pd.DataFrame,
+    stability: pd.Series,
+) -> pd.DataFrame:
+    """
+    Check the predictions D1 to D3 of `preregistration_2.md` (Study D).
+
+    - D1: the greedy one-shot plus score of each new model is within 5 points
+      of its published score, on both benchmarks
+    - D2: no pair of the MBPP+ cluster is distinguishable
+    - D3: on MBPP+, fewer than half of the random 1-run leaderboards keep the
+      order of all 6 models
+
+    :param validation: output of `compute_validation_table()` for the new
+        models
+    :param comparisons: output of `compare_agent_pairs()` for the 3 pairs of
+        the cluster, with the first 3 runs at 0.8
+    :param stability: summary of `compute_ranking_stability()` for the
+        one-shot agents of the 6 models on MBPP+, with the first 3 runs at
+        0.8
+    :return: 1 row per prediction, `D1` to `D3`, with `prediction`,
+        `observed`, and `holds`
+    """
+    rows = {}
+    # D1: the greedy scores against the published ones.
+    diff = validation["plus_diff"]
+    hdbg.dassert_eq(len(diff), 6, "Study D has 3 models x 2 benchmarks")
+    within = diff.abs() <= 0.05
+    model, benchmark = diff.abs().idxmax()
+    rows["D1"] = {
+        "prediction": "Greedy scores are within 5 points of the published",
+        "observed": (
+            f"{int(within.sum())} of {len(diff)} within 5 points, largest gap "
+            f"{100 * diff[(model, benchmark)]:+.1f} points "
+            f"({get_model_label(model)}, {benchmark})"
+        ),
+        "holds": bool(within.all()),
+    }
+    # D2: the 3 pairs of the MBPP+ cluster.
+    hdbg.dassert_eq(len(comparisons), 3, "The cluster has 3 pairs")
+    n_distinguishable = int(comparisons["distinguishable"].sum())
+    rows["D2"] = {
+        "prediction": "No pair of the MBPP+ cluster is distinguishable",
+        "observed": (
+            f"{n_distinguishable} of {len(comparisons)} pairs "
+            f"distinguishable, smallest Holm p "
+            f"{comparisons['p_holm'].min():.3g}"
+        ),
+        "holds": n_distinguishable == 0,
+    }
+    # D3: the 1-run leaderboards of the 6 models.
+    kept = float(stability["p_same_order"])
+    rows["D3"] = {
+        "prediction": "Fewer than half of the 1-run leaderboards keep the order",
+        "observed": f"{100 * kept:.1f}% keep the order of the 6 models",
+        "holds": kept < 0.5,
     }
     table = pd.DataFrame.from_dict(rows, orient="index")
     return table
