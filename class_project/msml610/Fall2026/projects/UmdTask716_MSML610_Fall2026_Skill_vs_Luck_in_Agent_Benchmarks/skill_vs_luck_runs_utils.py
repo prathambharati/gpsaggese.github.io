@@ -2,7 +2,7 @@
 Helper functions for the coding-benchmark runs of the Skill vs Luck project.
 
 Used by `run_coding_agents.py`, `score_coding_runs.py`, and the
-`skill_vs_luck.runs` notebook:
+`skill_vs_luck.runs` and `skill_vs_luck.one_run` notebooks:
 - Load HumanEval+ and MBPP+ with EvalPlus
 - Ask a model served by Ollama for a solution, with the EvalPlus prompt
 - Check a solution on the examples shown in the prompt (repair scaffold)
@@ -10,6 +10,7 @@ Used by `run_coding_agents.py`, `score_coding_runs.py`, and the
 - Read the public EvalPlus samples
 - Split the variance of a score into its task and run parts, compare agents
   over tasks and runs, and check how stable a 1-run leaderboard is
+- Tune and test the estimator of run luck from 1 run (Study B)
 
 Import as:
 
@@ -1057,16 +1058,18 @@ def get_scaffold_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
 # #############################################################################
 
 
-def load_scores(scores_dir: str) -> pd.DataFrame:
+def load_scores(scores_dir: str, *, pattern: str = "*.csv.gz") -> pd.DataFrame:
     """
-    Load all the scores saved by `score_coding_runs.py`.
+    Load the scores saved by `score_coding_runs.py`.
 
     :param scores_dir: e.g., `data/coding_runs`
+    :param pattern: files to load, e.g., `evalplus_*.csv.gz` for the public
+        samples only
     :return: 1 row per scored solution, with `source` (`local` or
         `evalplus`) and `benchmark` taken from the file name
     """
     frames = []
-    for path in sorted(glob.glob(os.path.join(scores_dir, "*.csv.gz"))):
+    for path in sorted(glob.glob(os.path.join(scores_dir, pattern))):
         source, benchmark = os.path.basename(path).split("_")[:2]
         # Keep an empty `failure` as `""` instead of NaN.
         frame = pd.read_csv(path, keep_default_na=False)
@@ -1958,6 +1961,602 @@ def check_predictions(
             f"times, ratio from {ratio.min():.2f} to {ratio.max():.2f}"
         ),
         "holds": bool((ratio >= 2).all()),
+    }
+    table = pd.DataFrame.from_dict(rows, orient="index")
+    return table
+
+
+# #############################################################################
+# Study B: run luck from 1 run
+# #############################################################################
+
+
+# Local models of the 2 phases of runs.
+PHASE_1_MODELS = (
+    "deepseek-coder:1.3b-instruct-q4_K_M",
+    "codeqwen:7b-chat-v1.5-q4_K_M",
+    "opencoder:8b",
+)
+PHASE_2_MODELS = (
+    "deepseek-coder:6.7b-instruct-q4_K_M",
+    "llama3.1:8b-instruct-q4_K_M",
+    "codegemma:7b-instruct-q4_K_M",
+)
+# Local models that also have public EvalPlus samples (on MBPP+). Those
+# samples never go into a matrix with the local model, since they show its
+# strengths on each task.
+_PUBLIC_NAMES = {
+    "deepseek-coder:1.3b-instruct-q4_K_M": "deepseek-coder-1.3b-instruct",
+    "deepseek-coder:6.7b-instruct-q4_K_M": "deepseek-coder-6.7b-instruct",
+}
+
+
+def get_public_greedy_agents(
+    scores: pd.DataFrame, benchmark: str
+) -> pd.DataFrame:
+    """
+    Get the public greedy samples of a benchmark, the extra agents of Study B.
+
+    :param scores: output of `load_scores()`
+    :param benchmark: `humaneval` or `mbpp`
+    :return: 1 row per public model with a greedy sample and 1 column per
+        task, with 0/1
+    """
+    mask = (
+        (scores["source"] == "evalplus")
+        & (scores["benchmark"] == benchmark)
+        & (scores["temperature"] == 0)
+    )
+    models = sorted(scores.loc[mask, "model"].unique())
+    hdbg.dassert_lt(0, len(models), "No public greedy samples")
+    rows = {}
+    for model in models:
+        matrix = get_outcome_matrix(
+            scores,
+            source="evalplus",
+            benchmark=benchmark,
+            model=model,
+            scaffold="one_shot",
+            temperature=0.0,
+        )
+        hdbg.dassert_eq(matrix.shape[1], 1, "Greedy samples have 1 run")
+        rows[model] = matrix[0]
+    agents = pd.DataFrame(rows).T
+    return agents
+
+
+def get_one_run_settings(
+    irt_models: List[str], penalties: List[float], extras: List[bool]
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build a grid of settings of the 1-run estimator.
+
+    :param irt_models: e.g., `["rasch", "2pl"]`
+    :param penalties: e.g., `[0.01, 0.1]`
+    :param extras: e.g., `[False, True]`, whether the matrices hold the
+        public greedy agents
+    :return: name (e.g., `rasch 0.01 alone`) -> `irt_model`, `penalty`, and
+        `extras`
+    """
+    settings = {}
+    for irt_model, penalty, use_extras in itertools.product(
+        irt_models, penalties, extras
+    ):
+        name = f"{irt_model} {penalty:g} {'extras' if use_extras else 'alone'}"
+        settings[name] = {
+            "irt_model": irt_model,
+            "penalty": penalty,
+            "extras": use_extras,
+        }
+    return settings
+
+
+def _draw_one_run(outcomes: pd.DataFrame, rng: np.random.Generator) -> pd.Series:
+    """
+    Draw 1 run at random for each task.
+
+    :param outcomes: tasks x runs matrix of 0/1
+    :param rng: random generator
+    :return: 0/1 of each task
+    """
+    values = outcomes.to_numpy()
+    picks = rng.integers(0, values.shape[1], size=values.shape[0])
+    one_run = pd.Series(
+        values[np.arange(values.shape[0]), picks], index=outcomes.index
+    )
+    return one_run
+
+
+def evaluate_one_run_estimator(
+    samples: Dict[str, pd.DataFrame],
+    extras: pd.DataFrame,
+    settings: Dict[str, Dict[str, Any]],
+    n_others: int,
+    *,
+    n_draws: int = 50,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """
+    Run the 1-run estimator on the public samples of 1 temperature.
+
+    This is the development set of Study B. Each model in `samples` is a
+    case. In each draw, the matrix of a case holds the model and `n_others`
+    other models of `samples` picked at random, each with 1 sample drawn at
+    random per task as its 1 run, like the test matrices that hold 3 or 6 of
+    our agents. With the `extras` setting, the matrix also holds the public
+    greedy agents of the models that are not in it. All the settings see the
+    same draws, so their errors can be compared.
+
+    :param samples: model -> tasks x samples matrix of 0/1, at 1 temperature
+    :param extras: output of `get_public_greedy_agents()`
+    :param settings: name -> `irt_model`, `penalty`, and `extras` (whether
+        the matrix holds the extra agents)
+    :param n_others: number of other sampled models in each matrix
+    :param n_draws: draws for each case
+    :param seed: random seed
+    :return: 1 row per setting, case, and draw with `setting`, `model`,
+        `draw`, `score` (of the 1 run), `estimate` (the run share before
+        any calibration), and `truth` (the run share from all the samples)
+    """
+    models = sorted(samples)
+    hdbg.dassert_lte(n_others, len(models) - 1)
+    rows = []
+    for case_index, model in enumerate(tqdm.tqdm(models, desc="Cases")):
+        truth = compute_variance_components(samples[model])["run_share"]
+        others = [other for other in models if other != model]
+        for draw in range(n_draws):
+            # The draw depends only on the seed, the case, and the draw index,
+            # so every setting sees the same matrices.
+            rng = np.random.default_rng([seed, case_index, draw])
+            picked = rng.choice(others, size=n_others, replace=False)
+            members = [model] + list(picked)
+            one_runs = pd.DataFrame(
+                {
+                    member: _draw_one_run(samples[member], rng)
+                    for member in members
+                }
+            ).T
+            # The extra agents never include the models of the matrix.
+            others_extras = extras.drop(index=members, errors="ignore")
+            for name, setting in settings.items():
+                if setting["extras"]:
+                    matrix = pd.concat([one_runs, others_extras])
+                else:
+                    matrix = one_runs
+                estimates = svlutils.estimate_run_share(
+                    matrix,
+                    irt_model=setting["irt_model"],
+                    penalty=setting["penalty"],
+                )
+                rows.append(
+                    {
+                        "setting": name,
+                        "model": model,
+                        "draw": draw,
+                        "score": estimates.loc[model, "score"],
+                        "estimate": estimates.loc[model, "run_share"],
+                        "truth": truth,
+                    }
+                )
+    results = pd.DataFrame(rows)
+    return results
+
+
+def fit_calibration(estimates: pd.Series, truths: pd.Series) -> float:
+    """
+    Find the calibration factor with the smallest mean absolute error.
+
+    The factor `c` that minimizes the sum of |truth - c x estimate| is the
+    median of truth / estimate, weighted by the estimate.
+
+    :param estimates: run shares before calibration
+    :param truths: measured run shares
+    :return: the factor
+    """
+    hdbg.dassert_eq(len(estimates), len(truths))
+    hdbg.dassert_lt(0, estimates.min(), "The estimates must be positive")
+    ratios = truths.to_numpy() / estimates.to_numpy()
+    order = np.argsort(ratios)
+    cumulative = np.cumsum(estimates.to_numpy()[order])
+    # The weighted median is the first ratio with half of the weight below it.
+    index = int(np.searchsorted(cumulative, cumulative[-1] / 2))
+    factor = float(ratios[order][index])
+    return factor
+
+
+def summarize_one_run_errors(
+    results: pd.DataFrame, *, tolerance: float = 0.10
+) -> pd.DataFrame:
+    """
+    Compare the settings of the 1-run estimator on the development set.
+
+    :param results: output of `evaluate_one_run_estimator()` for every
+        temperature, with a `temperature` column
+    :param tolerance: largest error that counts as close, e.g., `0.10` for
+        10 points
+    :return: 1 row per setting with:
+        - `above`: share of the draws where the estimate before
+          calibration is above the truth
+        - `error_raw`: mean absolute error before calibration
+        - `factor`: calibration factor fit on all the cases
+        - `error`, `within`: mean absolute error after calibration, and
+          share of the draws within `tolerance` of the truth
+        - `cv_error`, `cv_within`: the same when the factor of each model
+          comes from the other models only, which estimates the error on
+          new models
+    """
+    rows = {}
+    for name, group in results.groupby("setting", sort=False):
+        factor = fit_calibration(group["estimate"], group["truth"])
+        errors = (factor * group["estimate"] - group["truth"]).abs()
+        # Fit the factor without each model, then check it on that model.
+        cv_errors = []
+        for model in group["model"].unique():
+            train = group[group["model"] != model]
+            test = group[group["model"] == model]
+            cv_factor = fit_calibration(train["estimate"], train["truth"])
+            cv_error = (cv_factor * test["estimate"] - test["truth"]).abs()
+            cv_errors.append(cv_error)
+        cv_errors = pd.concat(cv_errors)
+        raw_errors = (group["estimate"] - group["truth"]).abs()
+        rows[name] = {
+            "above": float((group["estimate"] > group["truth"]).mean()),
+            "error_raw": float(raw_errors.mean()),
+            "factor": factor,
+            "error": float(errors.mean()),
+            "within": float((errors <= tolerance).mean()),
+            "cv_error": float(cv_errors.mean()),
+            "cv_within": float((cv_errors <= tolerance).mean()),
+        }
+    summary = pd.DataFrame.from_dict(rows, orient="index")
+    return summary
+
+
+def summarize_one_run_cases(
+    results: pd.DataFrame,
+    setting: str,
+    factor: float,
+    *,
+    tolerance: float = 0.10,
+) -> pd.DataFrame:
+    """
+    Summarize the draws of each development case for 1 setting.
+
+    :param results: output of `evaluate_one_run_estimator()` for every
+        temperature, with a `temperature` column
+    :param setting: name of the setting
+    :param factor: calibration factor applied to the estimates
+    :param tolerance: largest error that counts as close
+    :return: 1 row per temperature and model with `truth`, `estimate` (mean
+        of the calibrated estimates over the draws), `low` and `high` (10th
+        and 90th percentiles), and `within` (share of the draws within
+        `tolerance` of the truth)
+    """
+    group = results[results["setting"] == setting]
+    hdbg.dassert_lt(0, len(group), "No results for setting '%s'", setting)
+    calibrated = factor * group["estimate"]
+    close = (calibrated - group["truth"]).abs() <= tolerance
+    keys = [group["temperature"], group["model"]]
+    by_case = calibrated.groupby(keys)
+    cases = pd.DataFrame(
+        {
+            "truth": group["truth"].groupby(keys).first(),
+            "estimate": by_case.mean(),
+            "low": by_case.quantile(0.1),
+            "high": by_case.quantile(0.9),
+            "within": close.groupby(keys).mean(),
+        }
+    )
+    return cases
+
+
+def plot_one_run_estimates(
+    results: pd.DataFrame,
+    factors: Dict[str, float],
+    *,
+    tolerance: float = 0.10,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> None:
+    """
+    Plot the estimated run share of each development case against the truth.
+
+    There is 1 panel per setting. Each point is 1 model at 1 temperature, at
+    the mean of its draws, with a bar from the 10th to the 90th percentile
+    of the draws. The gray band holds the estimates within `tolerance` of
+    the truth.
+
+    :param results: output of `evaluate_one_run_estimator()` for every
+        temperature, with a `temperature` column
+    :param factors: setting -> calibration factor of its estimates
+    :param tolerance: half width of the band, e.g., `0.10` for 10 points
+    :param figsize: figure size, default `plt.rcParams["figure.figsize"]`
+    """
+    if figsize is None:
+        figsize = plt.rcParams["figure.figsize"]
+    fig, axes = plt.subplots(
+        1, len(factors), figsize=figsize, sharex=True, sharey=True, squeeze=False
+    )
+    limit = np.array([0.0, 1.0])
+    colors = {0.2: "tab:blue", 0.8: "tab:orange"}
+    for ax, (setting, factor) in zip(axes[0], factors.items()):
+        cases = summarize_one_run_cases(
+            results, setting, factor, tolerance=tolerance
+        )
+        # Shade the estimates within the tolerance of the truth.
+        ax.fill_between(
+            limit,
+            limit - tolerance,
+            limit + tolerance,
+            color="tab:gray",
+            alpha=0.2,
+            linewidth=0,
+            label=f"within {100 * tolerance:.0f} points",
+        )
+        ax.plot(limit, limit, color="tab:gray", linestyle=":", linewidth=1)
+        for temperature, group in cases.groupby(level="temperature"):
+            ax.errorbar(
+                group["truth"],
+                group["estimate"],
+                yerr=[
+                    group["estimate"] - group["low"],
+                    group["high"] - group["estimate"],
+                ],
+                fmt="o",
+                markersize=5,
+                linewidth=1,
+                color=colors.get(temperature, "tab:gray"),
+                label=f"temperature {temperature:g}",
+            )
+        ax.set_xlim(0, 0.8)
+        ax.set_ylim(0, 0.8)
+        ax.set_title(f"{setting}, factor {factor:.2f}")
+        ax.set_xlabel("Run share from all 50 samples")
+    axes[0][0].set_ylabel("Run share estimated from 1 sample")
+    axes[0][0].legend(loc="upper left")
+    fig.tight_layout()
+    plt.show()
+
+
+def compute_second_run_tasks(
+    outcomes: pd.DataFrame,
+    *,
+    tolerance: float = 0.10,
+    coverage: float = 0.95,
+    n_draws: int = 1000,
+    seed: int = 0,
+) -> float:
+    r"""
+    Find how many tasks need a second run to measure the run share of an
+    agent.
+
+    The first run covers every task and a second run covers only `n` tasks
+    picked at random. On those tasks, half the squared difference of the 2
+    runs estimates $p (1 - p)$ without bias, and its average divided by
+    score x (1 - score) of the first run is the run share.
+
+    :param outcomes: tasks x runs matrix of 0/1 of 1 agent; the first 2 runs
+        are used, and the run share from all the runs is the truth
+    :param tolerance: largest error allowed, e.g., `0.10` for 10 points
+    :param coverage: share of the random picks that must be within
+        `tolerance`
+    :param n_draws: random picks of the tasks
+    :param seed: random seed
+    :return: the smallest `n` such that `coverage` of the picks are within
+        `tolerance` for `n` and for every larger `n`, or NaN if even all the
+        tasks are not enough
+    """
+    values = outcomes.to_numpy(dtype=float)
+    n_tasks = values.shape[0]
+    hdbg.dassert_lte(2, values.shape[1], "Need at least 2 runs per task")
+    truth = compute_variance_components(outcomes)["run_share"]
+    score = values[:, 0].mean()
+    # Half the squared difference of 2 runs of a task is 0 or 1/2.
+    halves = (values[:, 0] - values[:, 1]) ** 2 / 2
+    # Each pick is the first `n` tasks of a random order, for all `n` at once.
+    rng = np.random.default_rng(seed)
+    orders = np.argsort(rng.random((n_draws, n_tasks)), axis=1)
+    sums = np.cumsum(halves[orders], axis=1)
+    estimates = sums / np.arange(1, n_tasks + 1) / (score * (1 - score))
+    within = (np.abs(estimates - truth) <= tolerance).mean(axis=0)
+    # Keep the `n` where this `n` and every larger one reach the coverage.
+    enough = np.flip(np.logical_and.accumulate(np.flip(within >= coverage)))
+    n_needed = float(np.argmax(enough) + 1) if enough.any() else np.nan
+    return n_needed
+
+
+# Settings of the 1-run estimator before any tuning (`preregistration_2.md`).
+UNTUNED_ONE_RUN_SETTING = {
+    "irt_model": "rasch",
+    "penalty": 0.01,
+    "calibration": 1.0,
+    "extras": False,
+}
+# Settings picked on the development set in the `skill_vs_luck.one_run`
+# notebook: of 21 settings, the one with the smallest error when the factor
+# of each model comes from the other models. Committed before the test set
+# was used.
+TUNED_ONE_RUN_SETTING = {
+    "irt_model": "2pl",
+    "penalty": 0.1,
+    "calibration": 1.344,
+    "extras": False,
+}
+
+
+def get_one_run_cases() -> pd.DataFrame:
+    """
+    List the 30 test cases of Study B in `preregistration_2.md`.
+
+    A case is 1 local agent on 1 benchmark at 1 temperature:
+    - Phase 1: the agents of the old models at 0.8 on both benchmarks
+    - Phase 2: the agents of the new models at 0.8 on both benchmarks, and
+      the agents of the old models at 0.2 on HumanEval+
+
+    :return: 1 row per case with `phase`, `benchmark`, `temperature`,
+        `model`, and `scaffold`
+    """
+    rows = []
+    for phase, models in ((1, PHASE_1_MODELS), (2, PHASE_2_MODELS)):
+        for benchmark in BENCHMARKS:
+            for model in models:
+                for scaffold in ("one_shot", "repair"):
+                    rows.append((phase, benchmark, 0.8, model, scaffold))
+    for model in PHASE_1_MODELS:
+        for scaffold in ("one_shot", "repair"):
+            rows.append((2, "humaneval", 0.2, model, scaffold))
+    cases = pd.DataFrame(
+        rows, columns=["phase", "benchmark", "temperature", "model", "scaffold"]
+    )
+    return cases
+
+
+def build_one_run_matrix(
+    scores: pd.DataFrame,
+    benchmark: str,
+    temperature: float,
+    model: str,
+    scaffold: str,
+    *,
+    extras: bool,
+) -> pd.DataFrame:
+    """
+    Build the 1-run matrix of a test case of Study B.
+
+    The matrix holds the agent of the case and the one-shot agents of the
+    other local models with the same benchmark and temperature, each with its
+    first run. With `extras`, it also holds the public greedy agents of the
+    benchmark, except the ones of the local models in the matrix. The
+    one-shot and repair agents of a model are never in the same matrix, since
+    the repair answer starts from the one-shot answer.
+
+    :param scores: output of `load_scores()` with the local and the public
+        scores
+    :param benchmark: benchmark of the case
+    :param temperature: temperature of the case
+    :param model: model of the case
+    :param scaffold: scaffold of the case
+    :param extras: whether the matrix holds the public greedy agents
+    :return: agents x tasks matrix of 0/1, with the agent of the case first,
+        e.g., `opencoder:8b / repair`
+    """
+    local = scores[scores["source"] == "local"]
+    mask = (
+        (local["benchmark"] == benchmark)
+        & (local["temperature"] == temperature)
+        & (local["scaffold"] == "one_shot")
+    )
+    models = sorted(local.loc[mask, "model"].unique())
+    hdbg.dassert_in(model, models)
+    # The case comes first, then the one-shot agents of the other models.
+    agents = [(model, scaffold)]
+    agents += [(other, "one_shot") for other in models if other != model]
+    one_runs = {}
+    for agent_model, agent_scaffold in agents:
+        outcomes = get_outcome_matrix(
+            scores,
+            source="local",
+            benchmark=benchmark,
+            model=agent_model,
+            scaffold=agent_scaffold,
+            temperature=temperature,
+        )
+        one_runs[f"{agent_model} / {agent_scaffold}"] = outcomes[0]
+    matrix = pd.DataFrame(one_runs).T
+    if extras:
+        # The extra agents never include a local model of the matrix.
+        public = get_public_greedy_agents(scores, benchmark)
+        same = [_PUBLIC_NAMES[name] for name in models if name in _PUBLIC_NAMES]
+        matrix = pd.concat([matrix, public.drop(index=same, errors="ignore")])
+    return matrix
+
+
+def estimate_one_run_cases(
+    scores: pd.DataFrame,
+    cases: pd.DataFrame,
+    settings: Dict[str, Dict[str, Any]],
+) -> pd.DataFrame:
+    """
+    Estimate the run share of each test case of Study B from its first run.
+
+    :param scores: output of `load_scores()` with the local scores of both
+        phases and the public scores
+    :param cases: output of `get_one_run_cases()`
+    :param settings: name -> `irt_model`, `penalty`, `calibration`, and
+        `extras` (see `build_one_run_matrix()`)
+    :return: `cases` with `n_runs`, `truth` (the run share from all the
+        runs), and 1 column per setting with its estimate
+    """
+    rows = []
+    for case in tqdm.tqdm(cases.itertuples(index=False), total=len(cases)):
+        # Find the truth from all the runs of the case.
+        outcomes = get_outcome_matrix(
+            scores,
+            source="local",
+            benchmark=case.benchmark,
+            model=case.model,
+            scaffold=case.scaffold,
+            temperature=case.temperature,
+        )
+        truth = compute_variance_components(outcomes)["run_share"]
+        row = {**case._asdict(), "n_runs": outcomes.shape[1], "truth": truth}
+        # Estimate the run share from the first runs, with each setting.
+        agent = f"{case.model} / {case.scaffold}"
+        for name, setting in settings.items():
+            matrix = build_one_run_matrix(
+                scores,
+                case.benchmark,
+                case.temperature,
+                case.model,
+                case.scaffold,
+                extras=setting["extras"],
+            )
+            estimates = svlutils.estimate_run_share(
+                matrix,
+                irt_model=setting["irt_model"],
+                penalty=setting["penalty"],
+                calibration=setting["calibration"],
+            )
+            row[name] = estimates.loc[agent, "run_share"]
+        rows.append(row)
+    results = pd.DataFrame(rows)
+    return results
+
+
+def check_one_run_predictions(
+    results: pd.DataFrame, *, tuned: str, untuned: str
+) -> pd.DataFrame:
+    """
+    Check the predictions B1 and B2 of `preregistration_2.md`.
+
+    Both are decided on the 18 phase-2 cases, since the run shares of the
+    phase-1 cases were known when the estimator was tuned.
+
+    :param results: output of `estimate_one_run_cases()`
+    :param tuned: name of the setting picked on the development set
+    :param untuned: name of the setting before any tuning
+    :return: 1 row per prediction with `prediction`, `observed`, and `holds`
+    """
+    phase_2 = results[results["phase"] == 2]
+    hdbg.dassert_eq(len(phase_2), 18, "Study B has 18 phase-2 cases")
+    within = (phase_2[tuned] - phase_2["truth"]).abs() <= 0.10
+    above = phase_2[untuned] > phase_2["truth"]
+    rows = {
+        "B1": {
+            "prediction": (
+                "The tuned estimate is within 10 points for at least 12 of "
+                "the 18 cases"
+            ),
+            "observed": f"{int(within.sum())} of 18 within 10 points",
+            "holds": bool(within.sum() >= 12),
+        },
+        "B2": {
+            "prediction": (
+                "The estimate before tuning is above the truth in more than "
+                "half of the 18 cases"
+            ),
+            "observed": f"{int(above.sum())} of 18 above the truth",
+            "holds": bool(above.sum() > 9),
+        },
     }
     table = pd.DataFrame.from_dict(rows, orient="index")
     return table

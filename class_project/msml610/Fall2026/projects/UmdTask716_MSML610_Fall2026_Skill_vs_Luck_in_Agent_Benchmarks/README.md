@@ -54,6 +54,16 @@ Chandrashekar), tracked in
 - Phase 2 (how many SWE-bench records were real, run luck from 1 run, lower
   temperatures, and 3 more models) is running, with its plan and predictions in
   `preregistration_2.md`, committed before any of it was analyzed
+  - Study A, in `skill_vs_luck.records.ipynb`: only 2 of the 30 SWE-bench
+    Verified records are distinguishable from the record they broke, and they
+    carry 33% of the 74.8 points of progress; since June 2024, 27 records in a
+    row were each within the noise of the record before (A1 and A2 held, A3 did
+    not)
+  - Study B, in `skill_vs_luck.one_run.ipynb`, is tuned on the public samples
+    only: from 1 run, a 2PL fit of agents run at the same temperature puts the
+    run share within 10 points of the truth in 86% of the draws, while adding
+    the public greedy agents made every setting worse; the tuned estimator is
+    frozen before it sees our runs
 
 ## Status of the Milestones
 
@@ -96,10 +106,14 @@ Chandrashekar), tracked in
 | `skill_vs_luck.API.py`                  | Jupytext pair of `skill_vs_luck.API.ipynb`                                  | Notebooks |
 | `skill_vs_luck.example.ipynb`           | Milestones 1 and 2 on the SWE-bench Verified leaderboard                    | Notebooks |
 | `skill_vs_luck.example.py`              | Jupytext pair of `skill_vs_luck.example.ipynb`                              | Notebooks |
+| `skill_vs_luck.one_run.ipynb`           | Study B: run luck estimated from 1 run, tuned on the public samples         | Notebooks |
+| `skill_vs_luck.one_run.py`              | Jupytext pair of `skill_vs_luck.one_run.ipynb`                              | Notebooks |
+| `skill_vs_luck.records.ipynb`           | Study A: each SWE-bench Verified record tested against the one it broke     | Notebooks |
+| `skill_vs_luck.records.py`              | Jupytext pair of `skill_vs_luck.records.ipynb`                              | Notebooks |
 | `skill_vs_luck.runs.ipynb`              | Run-to-run luck of the local agents on HumanEval+ and MBPP+                 | Notebooks |
 | `skill_vs_luck.runs.py`                 | Jupytext pair of `skill_vs_luck.runs.ipynb`                                 | Notebooks |
 | `skill_vs_luck_runs_utils.py`           | Prompts, Ollama client, scoring, and run-level analysis of the coding runs  | Library   |
-| `skill_vs_luck_utils.py`                | Data loading, intervals, paired tests, benchmark size, simulation, plots    | Library   |
+| `skill_vs_luck_utils.py`                | Data, intervals, paired tests, records, benchmark size, simulation, IRT     | Library   |
 | `test/test_skill_vs_luck_runs_utils.py` | Unit tests for `skill_vs_luck_runs_utils.py`                                | Tests     |
 | `test/test_skill_vs_luck_utils.py`      | Unit tests for `skill_vs_luck_utils.py`                                     | Tests     |
 | `version.sh`                            | Print the package versions inside the image                                 | Docker    |
@@ -266,8 +280,9 @@ Chandrashekar), tracked in
   ```
 
 - Open `http://localhost:8888`, then run `skill_vs_luck.API.ipynb` first,
-  `skill_vs_luck.example.ipynb` second, and `skill_vs_luck.runs.ipynb` (the
-  local runs) third
+  `skill_vs_luck.example.ipynb` second, `skill_vs_luck.records.ipynb` (the
+  SWE-bench records) third, `skill_vs_luck.runs.ipynb` (the local runs)
+  fourth, and `skill_vs_luck.one_run.ipynb` (run luck from 1 run) fifth
 
 ## Run a Notebook as a Script
 
