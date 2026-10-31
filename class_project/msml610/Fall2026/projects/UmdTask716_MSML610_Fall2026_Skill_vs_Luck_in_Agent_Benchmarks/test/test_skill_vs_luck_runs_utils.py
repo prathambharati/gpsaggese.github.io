@@ -2013,6 +2013,49 @@ class Test_estimate_one_run_cases(hunitest.TestCase):
 
 
 # #############################################################################
+# Test_summarize_one_run_test
+# #############################################################################
+
+
+class Test_summarize_one_run_test(hunitest.TestCase):
+    """
+    Test `skill_vs_luck_runs_utils.summarize_one_run_test()`.
+    """
+
+    def test1(self) -> None:
+        """
+        Test the means, the errors, and the shares of B1 and B2 in each group
+        of cases.
+        """
+        # Prepare inputs: in the last group, the tuned estimates are off by
+        # 0.20 and 0.05, so 1 of the 2 is within 10 points, and no estimate
+        # before tuning is above the truth.
+        results = pd.DataFrame(
+            {
+                "phase": [1, 2, 2, 2],
+                "temperature": [0.8, 0.2, 0.8, 0.8],
+                "truth": [0.4, 0.2, 0.5, 0.3],
+                "untuned": [0.5, 0.35, 0.45, 0.2],
+                "tuned": [0.45, 0.25, 0.3, 0.35],
+            }
+        )
+        # Prepare outputs.
+        expected = """
+           phase  temperature  cases  truth  untuned  tuned  untuned_error  tuned_error  within  above
+        0      1          0.8      1    0.4    0.500  0.450          0.100        0.050     1.0    1.0
+        1      2          0.2      1    0.2    0.350  0.250          0.150        0.050     1.0    1.0
+        2      2          0.8      2    0.4    0.325  0.325          0.075        0.125     0.5    0.0
+        """
+        # Run test.
+        summary = rutils.summarize_one_run_test(
+            results, tuned="tuned", untuned="untuned"
+        )
+        # Check outputs.
+        actual = summary.reset_index().round(3).to_string()
+        self.assert_equal(actual, expected, dedent=True)
+
+
+# #############################################################################
 # Test_check_one_run_predictions
 # #############################################################################
 
@@ -2088,6 +2131,53 @@ class Test_check_one_run_predictions(hunitest.TestCase):
             for name, row in table.iterrows()
         )
         self.assert_equal(actual, expected, dedent=True)
+
+
+# #############################################################################
+# Test_compute_second_run_cases
+# #############################################################################
+
+
+class Test_compute_second_run_cases(hunitest.TestCase):
+    """
+    Test `skill_vs_luck_runs_utils.compute_second_run_cases()`.
+    """
+
+    def test1(self) -> None:
+        """
+        Test that each case gets the count of its own runs.
+        """
+        # Prepare inputs: `x:1` has no run luck, so 1 second run is enough,
+        # while the first 2 runs of `y:1` always differ on 2 of its 4 tasks,
+        # so even a second run of every task gives 1.0 against 0.8.
+        runs = {
+            "x:1": [[1, 1], [1, 1], [0, 0], [0, 0]],
+            "y:1": [[1, 1, 1, 1], [1, 1, 1, 1], [0, 1, 0, 1], [0, 1, 0, 1]],
+        }
+        rows = [
+            _get_score_row(model, 0.8, "one_shot", task, run, passed)
+            for model, tasks in runs.items()
+            for task, outcomes in enumerate(tasks)
+            for run, passed in enumerate(outcomes)
+        ]
+        scores = pd.DataFrame(rows)
+        cases = pd.DataFrame(
+            [
+                (1, "humaneval", 0.8, "x:1", "one_shot"),
+                (2, "humaneval", 0.8, "y:1", "one_shot"),
+            ],
+            columns=["phase", "benchmark", "temperature", "model", "scaffold"],
+        )
+        # Prepare outputs.
+        expected = """
+           phase  benchmark  temperature model  scaffold  n_tasks  second_run_tasks
+        0      1  humaneval          0.8   x:1  one_shot        4               1.0
+        1      2  humaneval          0.8   y:1  one_shot        4               NaN
+        """
+        # Run test.
+        results = rutils.compute_second_run_cases(scores, cases)
+        # Check outputs.
+        self.assert_equal(results.to_string(), expected, dedent=True)
 
 
 # #############################################################################

@@ -2565,6 +2565,121 @@ def estimate_one_run_cases(
     return results
 
 
+def summarize_one_run_test(
+    results: pd.DataFrame,
+    *,
+    tuned: str,
+    untuned: str,
+    tolerance: float = 0.10,
+) -> pd.DataFrame:
+    """
+    Summarize the test cases of Study B by phase and temperature.
+
+    :param results: output of `estimate_one_run_cases()`
+    :param tuned: name of the setting picked on the development set
+    :param untuned: name of the setting before any tuning
+    :param tolerance: largest error that counts as close, e.g., `0.10` for
+        10 points
+    :return: 1 row per phase and temperature with:
+        - `cases`: number of cases
+        - `truth`, `untuned`, `tuned`: mean run share, measured and
+          estimated by each setting
+        - `untuned_error`, `tuned_error`: mean absolute error of each
+          setting, to compare with the errors on the development set
+        - `within`: share of the cases whose tuned estimate is within
+          `tolerance` of the truth, the rule of B1
+        - `above`: share of the cases whose estimate before tuning is above
+          the truth, the rule of B2
+    """
+    keys = [results["phase"], results["temperature"]]
+    untuned_errors = (results[untuned] - results["truth"]).abs()
+    tuned_errors = (results[tuned] - results["truth"]).abs()
+    columns = pd.DataFrame(
+        {
+            "truth": results["truth"],
+            "untuned": results[untuned],
+            "tuned": results[tuned],
+            "untuned_error": untuned_errors,
+            "tuned_error": tuned_errors,
+            "within": tuned_errors <= tolerance,
+            "above": results[untuned] > results["truth"],
+        }
+    )
+    summary = columns.groupby(keys).mean()
+    summary.insert(0, "cases", columns.groupby(keys).size())
+    return summary
+
+
+def plot_one_run_test(
+    results: pd.DataFrame,
+    settings: List[str],
+    *,
+    tolerance: float = 0.10,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> None:
+    """
+    Plot the estimated run share of each test case of Study B against the
+    truth.
+
+    There is 1 panel per setting. Each point is 1 case, colored by its
+    temperature as in `plot_one_run_estimates()`; the phase-1 cases, whose
+    run shares were known when the estimator was tuned, are hollow. The gray
+    band holds the estimates within `tolerance` of the truth.
+
+    :param results: output of `estimate_one_run_cases()`
+    :param settings: names of the settings to plot, e.g., `["untuned",
+        "tuned"]`
+    :param tolerance: half width of the band, e.g., `0.10` for 10 points
+    :param figsize: figure size, default `plt.rcParams["figure.figsize"]`
+    """
+    if figsize is None:
+        figsize = plt.rcParams["figure.figsize"]
+    fig, axes = plt.subplots(
+        1,
+        len(settings),
+        figsize=figsize,
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+    # Leave room above the largest run share, in steps of 0.1.
+    largest = float(results[["truth", *settings]].to_numpy().max())
+    top = min(1.0, np.ceil(10 * largest + 0.5) / 10)
+    limit = np.array([0.0, top])
+    colors = {0.2: "tab:blue", 0.8: "tab:orange"}
+    for ax, setting in zip(axes[0], settings):
+        # Shade the estimates within the tolerance of the truth.
+        ax.fill_between(
+            limit,
+            limit - tolerance,
+            limit + tolerance,
+            color="tab:gray",
+            alpha=0.2,
+            linewidth=0,
+            label=f"within {100 * tolerance:.0f} points",
+        )
+        ax.plot(limit, limit, color="tab:gray", linestyle=":", linewidth=1)
+        groups = results.groupby(["phase", "temperature"])
+        for (phase, temperature), group in groups:
+            color = colors.get(temperature, "tab:gray")
+            ax.scatter(
+                group["truth"],
+                group[setting],
+                s=40,
+                facecolors=color if phase == 2 else "none",
+                edgecolors=color,
+                label=f"phase {phase}, temperature {temperature:g}",
+            )
+        ax.set_xlim(0, top)
+        ax.set_ylim(0, top)
+        ax.set_title(setting)
+        ax.set_xlabel("Run share from all the runs")
+    axes[0][0].set_ylabel("Run share estimated from run 1")
+    axes[0][0].legend(loc="upper left")
+    fig.tight_layout()
+    plt.show()
+
+
 def check_one_run_predictions(
     results: pd.DataFrame, *, tuned: str, untuned: str
 ) -> pd.DataFrame:
@@ -2603,6 +2718,40 @@ def check_one_run_predictions(
     }
     table = pd.DataFrame.from_dict(rows, orient="index")
     return table
+
+
+def compute_second_run_cases(
+    scores: pd.DataFrame, cases: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Find how many tasks need a second run in each test case of Study B.
+
+    :param scores: output of `load_scores()` with the local scores of both
+        phases
+    :param cases: output of `get_one_run_cases()`
+    :return: `cases` with `n_tasks` and `second_run_tasks`, the output of
+        `compute_second_run_tasks()` on all the runs of the case (NaN when
+        even a second run of every task is not enough)
+    """
+    rows = []
+    for case in cases.itertuples(index=False):
+        outcomes = get_outcome_matrix(
+            scores,
+            source="local",
+            benchmark=case.benchmark,
+            model=case.model,
+            scaffold=case.scaffold,
+            temperature=case.temperature,
+        )
+        rows.append(
+            {
+                **case._asdict(),
+                "n_tasks": outcomes.shape[0],
+                "second_run_tasks": compute_second_run_tasks(outcomes),
+            }
+        )
+    results = pd.DataFrame(rows)
+    return results
 
 
 # #############################################################################
