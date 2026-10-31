@@ -2,7 +2,9 @@
 Helper functions for the coding-benchmark runs of the Skill vs Luck project.
 
 Used by `run_coding_agents.py`, `score_coding_runs.py`, and the
-`skill_vs_luck.runs` and `skill_vs_luck.one_run` notebooks:
+`skill_vs_luck.runs`, `skill_vs_luck.one_run`,
+`skill_vs_luck.one_run_test_set`, `skill_vs_luck.temperatures`, and
+`skill_vs_luck.more_models` notebooks:
 - Load HumanEval+ and MBPP+ with EvalPlus
 - Ask a model served by Ollama for a solution, with the EvalPlus prompt
 - Check a solution on the examples shown in the prompt (repair scaffold)
@@ -1622,9 +1624,12 @@ def plot_variance_parts(
     for i, (_, row) in enumerate(data.iterrows()):
         total = row["sigma2_task"] + row["sigma2_run"]
         ax.text(total, i, f"  {100 * row['run_share']:.0f}% runs", va="center")
+    # Leave room for the labels and keep the legend away from the bars.
+    totals = data["sigma2_task"] + data["sigma2_run"]
+    ax.set_xlim(0, 1.3 * totals.max())
     ax.set_xlabel("Variance of a 1-run outcome on a task")
     ax.set_title(title)
-    ax.legend(loc="lower right")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0))
     fig.tight_layout()
     plt.show()
 
@@ -1690,6 +1695,9 @@ def plot_flip_rates(
     Plot how often each pair of agents swaps places in a 1-run leaderboard,
     against the gap between them.
 
+    Only the pairs that swap in some leaderboards get a label: the others all
+    sit at 0, where their labels would cover each other.
+
     :param pairs: second output of `compute_ranking_stability()`
     :param title: plot title
     :param figsize: figure size, default `plt.rcParams["figure.figsize"]`
@@ -1698,7 +1706,7 @@ def plot_flip_rates(
         figsize = plt.rcParams["figure.figsize"]
     fig, ax = plt.subplots(figsize=figsize)
     ax.scatter(100 * pairs["gap"], 100 * pairs["p_flip"], color="tab:blue")
-    for _, row in pairs.iterrows():
+    for _, row in pairs[pairs["p_flip"] > 0].iterrows():
         ax.annotate(
             f"{row['upper']} > {row['lower']}",
             (100 * row["gap"], 100 * row["p_flip"]),

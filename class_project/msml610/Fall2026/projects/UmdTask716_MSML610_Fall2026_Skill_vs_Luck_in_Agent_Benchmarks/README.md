@@ -52,7 +52,7 @@ Chandrashekar), tracked in
   - 4 of the 7 pre-registered predictions held (P1, P2, P4, P6), and P3, P5, and
     P7 did not
 - Phase 2 (how many SWE-bench records were real, run luck from 1 run, lower
-  temperatures, and 3 more models) is running, with its plan and predictions in
+  temperatures, and 3 more models) has its plan and predictions in
   `preregistration_2.md`, committed before any of it was analyzed
   - Study A, in `skill_vs_luck.records.ipynb`: only 2 of the 30 SWE-bench
     Verified records are distinguishable from the record they broke, and they
@@ -62,8 +62,25 @@ Chandrashekar), tracked in
   - Study B, in `skill_vs_luck.one_run.ipynb`, is tuned on the public samples
     only: from 1 run, a 2PL fit of agents run at the same temperature puts the
     run share within 10 points of the truth in 86% of the draws, while adding
-    the public greedy agents made every setting worse; the tuned estimator is
-    frozen before it sees our runs
+    the public greedy agents made every setting worse
+    - Its test on our runs, in `skill_vs_luck.one_run_test_set.ipynb`, run once
+      after the estimator was committed, failed: the tuned estimate is within
+      10 points for only 7 of the 18 new cases (B1 did not hold), mostly
+      because it is too high at temperature 0.8; before tuning it is above the
+      truth in 16 of the 18 (B2 held)
+  - Study C, in `skill_vs_luck.temperatures.ipynb`: at temperature 0.2 runs are
+    15% to 21% of the variance of 1 run (37% to 52% at 0.8), 2 greedy runs give
+    the same result on every task, and the close pair still cannot be told
+    apart; with one-shot, 1-run leaderboards keep the order as often at 0.2 as
+    at 0.8 (C1 to C4 held, C5 did not)
+  - Study D, in `skill_vs_luck.more_models.ipynb`: with 3 more models, only
+    44.4% of the 1-run leaderboards of the 6 models keep the order on MBPP+ (D3
+    held); Llama 3.1 8B scores 7.6 points above its published greedy MBPP+
+    score (D1 did not hold), and the 3 models within 2.1 points of each other
+    in the published MBPP+ scores are 5 to 12 points apart in our runs (D2 did
+    not hold)
+  - 8 of the 13 phase-2 predictions held (A1, A2, B2, C1 to C4, and D3), and
+    A3, B1, C5, D1, and D2 did not
 
 ## Status of the Milestones
 
@@ -76,13 +93,14 @@ Chandrashekar), tracked in
 
 ## Structure of the Dir
 
-| Dir                       | Description                                                                        |
-| :------------------------ | :--------------------------------------------------------------------------------- |
-| `data/`                   | SWE-bench Verified snapshot, list of the EvalPlus downloads, and the coding scores |
-| `data/coding_runs/`       | Scores of the coding-benchmark solutions, from `score_coding_runs.py`              |
-| `data/coding_runs_pilot/` | Scores of the 20-task pilot                                                        |
-| `data/raw/`               | Downloads and raw model answers, rebuilt by the scripts and not committed          |
-| `test/`                   | Unit tests                                                                         |
+| Dir                        | Description                                                                        |
+| :------------------------- | :--------------------------------------------------------------------------------- |
+| `data/`                    | SWE-bench Verified snapshot, list of the EvalPlus downloads, and the coding scores |
+| `data/coding_runs/`        | Scores of the coding-benchmark solutions, from `score_coding_runs.py`              |
+| `data/coding_runs_phase2/` | Scores of the phase-2 runs (Studies B, C, and D), on Google Drive, not committed   |
+| `data/coding_runs_pilot/`  | Scores of the 20-task pilot                                                        |
+| `data/raw/`                | Downloads and raw model answers, rebuilt by the scripts and not committed          |
+| `test/`                    | Unit tests                                                                         |
 
 ## Description of Files
 
@@ -106,12 +124,18 @@ Chandrashekar), tracked in
 | `skill_vs_luck.API.py`                  | Jupytext pair of `skill_vs_luck.API.ipynb`                                  | Notebooks |
 | `skill_vs_luck.example.ipynb`           | Milestones 1 and 2 on the SWE-bench Verified leaderboard                    | Notebooks |
 | `skill_vs_luck.example.py`              | Jupytext pair of `skill_vs_luck.example.ipynb`                              | Notebooks |
+| `skill_vs_luck.more_models.ipynb`       | Study D: 3 more local models, greedy and at temperature 0.8                 | Notebooks |
+| `skill_vs_luck.more_models.py`          | Jupytext pair of `skill_vs_luck.more_models.ipynb`                          | Notebooks |
 | `skill_vs_luck.one_run.ipynb`           | Study B: run luck estimated from 1 run, tuned on the public samples         | Notebooks |
 | `skill_vs_luck.one_run.py`              | Jupytext pair of `skill_vs_luck.one_run.ipynb`                              | Notebooks |
+| `skill_vs_luck.one_run_test_set.ipynb`  | Study B: the tuned 1-run estimator tested once on our runs                  | Notebooks |
+| `skill_vs_luck.one_run_test_set.py`     | Jupytext pair of `skill_vs_luck.one_run_test_set.ipynb`                     | Notebooks |
 | `skill_vs_luck.records.ipynb`           | Study A: each SWE-bench Verified record tested against the one it broke     | Notebooks |
 | `skill_vs_luck.records.py`              | Jupytext pair of `skill_vs_luck.records.ipynb`                              | Notebooks |
 | `skill_vs_luck.runs.ipynb`              | Run-to-run luck of the local agents on HumanEval+ and MBPP+                 | Notebooks |
 | `skill_vs_luck.runs.py`                 | Jupytext pair of `skill_vs_luck.runs.ipynb`                                 | Notebooks |
+| `skill_vs_luck.temperatures.ipynb`      | Study C: the 3 old models at temperature 0.2 and in a second greedy run     | Notebooks |
+| `skill_vs_luck.temperatures.py`         | Jupytext pair of `skill_vs_luck.temperatures.ipynb`                         | Notebooks |
 | `skill_vs_luck_runs_utils.py`           | Prompts, Ollama client, scoring, and run-level analysis of the coding runs  | Library   |
 | `skill_vs_luck_utils.py`                | Data, intervals, paired tests, records, benchmark size, simulation, IRT     | Library   |
 | `test/test_skill_vs_luck_runs_utils.py` | Unit tests for `skill_vs_luck_runs_utils.py`                                | Tests     |
@@ -283,6 +307,11 @@ Chandrashekar), tracked in
   `skill_vs_luck.example.ipynb` second, `skill_vs_luck.records.ipynb` (the
   SWE-bench records) third, `skill_vs_luck.runs.ipynb` (the local runs)
   fourth, and `skill_vs_luck.one_run.ipynb` (run luck from 1 run) fifth
+
+- Then run the 3 notebooks of phase 2, which need the scores in
+  `data/coding_runs_phase2/`: `skill_vs_luck.one_run_test_set.ipynb` (the test
+  of Study B), `skill_vs_luck.temperatures.ipynb` (Study C), and
+  `skill_vs_luck.more_models.ipynb` (Study D)
 
 ## Run a Notebook as a Script
 
